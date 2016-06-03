@@ -1,0 +1,226 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Test Template for nCloud",
+
+  "Parameters" : {
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the etcd host",
+      "Type" : "String",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern" : "[-_ a-zA-Z0-9]*",
+      "Default" : "pmoosh-pm-oo-or",
+      "ConstraintDescription" : "can contain only alphanumeric characters, spaces, dashes and underscores."
+    }
+  },
+  "Resources" : {
+    "nCloudVPC" : {
+      "Type" : "AWS::EC2::VPC",
+      "Properties" : {
+        "CidrBlock" : "10.0.0.0/16",
+        "Tags" : [
+          {"Key" : "Application", "Value" : { "Ref" : "AWS::StackId"} },
+          {"Key" : "Network", "Value" : "Public" }
+        ]
+      }
+    },
+    "nCloudSubnet" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "nCloudVPC" },
+        "MapPublicIpOnLaunch" : "true",
+        "CidrBlock" : "10.0.0.0/24",
+        "AvailabilityZone" : { "Fn::Select" : ["0", { "Fn::GetAZs" : { "Ref" : "AWS::Region" } }]},
+        "Tags" : [
+          {"Key" : "Application", "Value" : { "Ref" : "AWS::StackId"} },
+          {"Key" : "Network", "Value" : "Public" }
+        ]
+      }
+    },
+    "nCloudGateway" : {
+      "Type" : "AWS::EC2::InternetGateway",
+      "Properties" : {
+        "Tags" : [
+          { "Key" : "Application", "Value" : { "Ref" : "AWS::StackName" } }
+        ]
+      }
+    },
+    "GatewayToInternet" : {
+       "Type" : "AWS::EC2::VPCGatewayAttachment",
+       "Properties" : {
+         "VpcId" : { "Ref" : "nCloudVPC" },
+         "InternetGatewayId" : { "Ref" : "nCloudGateway" }
+       }
+    },
+    "Route" : {
+      "Type" : "AWS::EC2::Route",
+      "Properties" : {
+        "RouteTableId" : { "Ref" : "RouteTable" },
+        "DestinationCidrBlock" : "0.0.0.0/0",
+        "GatewayId" : { "Ref" : "nCloudGateway" }
+      }
+    },
+    "RouteTable" : {
+      "Type" : "AWS::EC2::RouteTable",
+      "Properties" : {
+        "VpcId" : { "Ref" : "nCloudVPC" },
+        "Tags" : [
+          { "Key" : "Application", "Value" : { "Ref" : "AWS::StackName" } }
+        ]
+      }
+    },
+    "SubnetRouteTableAssociation" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "nCloudSubnet" },
+        "RouteTableId" : { "Ref" : "RouteTable" }
+      }
+    },
+    "ServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "opsworks.amazonaws.com"
+                ]
+              },
+              "Action": [
+                  "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "opsworks-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:*",
+                    "iam:PassRole",
+                    "cloudwatch:GetMetricStatistics",
+                    "elasticloadbalancing:*"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "OpsWorksEC2Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                  ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "opsworks-ec2-role",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeRegions",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeTags",
+                    "cloudwatch:PutMetricData"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "InstanceRole": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "OpsWorksEC2Role"
+          }
+        ]
+      }
+    },
+    "nCloudStack" : {
+      "Type" : "AWS::OpsWorks::Stack",
+      "Properties" : {
+        "Name" : "test",
+        "ServiceRoleArn" : { "Fn::GetAtt": [ "ServiceRole", "Arn" ] },
+        "DefaultInstanceProfileArn" : { "Fn::Join": ["", ["arn:aws:iam::", {"Ref":"AWS::AccountId"}, ":instance-profile/aws-opsworks-ec2-role"]] },
+        "DefaultSshKeyName" : {"Ref":"KeyName"},
+        "UseCustomCookbooks": "true",
+        "CustomCookbooksSource": {
+          "Revision" : "master",
+          "Type": "git",
+          "Url": "https://github.com/pmoosh/ncloud-cookbooks.git"
+        },
+          "ConfigurationManager": {
+            "Name": "Chef",
+            "Version": "12"
+        },
+        "VpcId": { "Ref": "nCloudVPC" },
+        "DefaultSubnetId" : { "Ref": "nCloudSubnet" },
+        "DefaultInstanceProfileArn": { "Fn::GetAtt": [ "InstanceRole", "Arn" ] }
+      }
+    },
+    "nCloudLayer": {
+      "Type": "AWS::OpsWorks::Layer",
+      "Properties": {
+        "StackId": {"Ref": "nCloudStack"},
+	      "Name": "etcd",
+        "Type": "custom",
+        "Shortname" : "etcd",
+        "EnableAutoHealing" : "true",
+        "AutoAssignElasticIps" : "false",
+        "AutoAssignPublicIps" : "true",
+        "CustomRecipes": {
+          "Setup": [
+            "ncloud-etcd"
+          ]
+        }
+      }
+    },
+    "nCloudInstance": {
+      "Type": "AWS::OpsWorks::Instance",
+      "Properties": {
+        "Os": "Ubuntu 14.04 LTS",
+        "StackId": {
+          "Ref": "nCloudStack"
+        },
+        "LayerIds": [
+          {
+            "Ref": "nCloudLayer"
+          }
+        ],
+        "InstanceType": "m1.small"
+      }
+    }
+  }
+}
